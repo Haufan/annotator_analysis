@@ -1,4 +1,8 @@
+
+import argparse
+import os
 import xml.etree.ElementTree as ET
+
 from collections import defaultdict, Counter
 
 
@@ -113,6 +117,8 @@ class Node:
         self.node_type = node_type
         self.relname = relname
         self.children = []
+        self.lowest_node_id = node_id  # Start with the node's own ID as the lowest
+        self.highest_node_id = node_id  # Start with the node's own ID as the highest           # relations auslesen und dann nur diese zählen.
 
     def add_child(self, child_node):
         self.children.append(child_node)
@@ -140,7 +146,7 @@ class Node:
 
         return tree_str
 
-    def collect_relations_and_positions(self, level=0):
+    def collect_relations_and_positions(self, level=0, right_to_left_count=0, left_to_right_count=0):
         relations_count = Counter()
         position_count = defaultdict(lambda: Counter())
 
@@ -159,14 +165,37 @@ class Node:
             relations_count[self.relname] += 1
             position_count[self.relname][position] += 1
 
+        # Initialize the node's ID as the lowest and highest in its subtree
+        subtree_lowest = self.node_id
+        subtree_highest = self.node_id
+
         # Recursive count and position collection for children
         for child in self.children:
-            child_relations, child_positions = child.collect_relations_and_positions(level + 1)
+            # Recursive call with updated counts
+            child_relations, child_positions, right_to_left_count, left_to_right_count = child.collect_relations_and_positions(
+                level + 1, right_to_left_count, left_to_right_count
+            )
             relations_count.update(child_relations)
             for relname, pos_counter in child_positions.items():
                 position_count[relname].update(pos_counter)
 
-        return relations_count, position_count
+            # Update the lowest and highest node IDs in the subtree
+            subtree_lowest = min(subtree_lowest, child.lowest_node_id)
+            subtree_highest = max(subtree_highest, child.highest_node_id)
+
+            # Determine and count the direction of the relation
+            if child.highest_node_id < self.lowest_node_id:
+                right_to_left_count += 1
+                print(f"Right to Left relation between {child.node_id} and {self.node_id}")
+            elif child.lowest_node_id > self.highest_node_id:
+                left_to_right_count += 1
+                print(f"Left to Right relation between {child.node_id} and {self.node_id}")
+
+        # Set the lowest and highest node IDs for the current node
+        self.lowest_node_id = subtree_lowest
+        self.highest_node_id = subtree_highest
+
+        return relations_count, position_count, right_to_left_count, left_to_right_count
 
     def __repr__(self):
         return f"Node({self.node_id}, text={self.text}, relname={self.relname})"
@@ -237,49 +266,127 @@ def build_tree(nodes_data, structure_data):
 
 def print_tree(root):
     if root:
-        print(root.pretty_print())
+        return root.pretty_print()
     else:
-        print("No root node found!")
+        return "No root node found!"
 
 
 #######################################################################################################################
 
 def analyze_relations_and_positions(root):
     if not root:
-        print("No root node for analysis!")
-        return
+        return "No root node for analysis!"
 
-    relations_count, position_count = root.collect_relations_and_positions()
+    # Collect relations, positions, and right-to-left / left-to-right counts
+    relations_count, position_count, right_to_left_count, left_to_right_count = root.collect_relations_and_positions(
+        level=0)
 
-    # Sort relations by count in descending order
+    # Calculate the total number of relations
+    total_relations = sum(relations_count.values())
+
+    # Sort relations by their counts in descending order
     sorted_relations = sorted(relations_count.items(), key=lambda x: x[1], reverse=True)
 
-    print("\nRelation counts:")
+    # Start constructing the analysis output
+    analysis_str = f"\nTotal relations: {total_relations} times\n\nRelation counts:\n"
     for relname, count in sorted_relations:
-        # Build positional breakdown for each relation
+        # Breakdown of positions for each relation
         pos_breakdown = ", ".join(f"{pos}: {position_count[relname][pos]} times"
                                   for pos in ['top', 'middle', 'bottom']
                                   if position_count[relname][pos] > 0)
-        print(f"{relname}: {count} times ({pos_breakdown})")
+        analysis_str += f"{relname}: {count} times ({pos_breakdown})\n"
+
+    # Append the counts for right-to-left and left-to-right relations
+    analysis_str += f"\nTotal Right to Left relations: {right_to_left_count}\n"
+    analysis_str += f"Total Left to Right relations: {left_to_right_count}\n"
+
+    return analysis_str
+
+
+#######################################################################################################################
+
+def find_rs3_files(directory):
+    """
+    This function takes a directory path and returns a list of all files ending in .rs3
+    within that directory and its subdirectories.
+
+    Parameters:
+    directory (str): The path to the directory to search.
+
+    Returns:
+    list: A list of file paths ending with .rs3
+    """
+    rs3_files = []
+
+    for root, _, files in os.walk(directory):
+        for file in files:
+            if file.endswith('.rs3'):
+                full_path = os.path.join(root, file)
+                rs3_files.append(full_path)
+
+    return rs3_files
+
+
+#######################################################################################################################
+
+def process_rs3_file(file_path):
+    """
+    Processes a single .rs3 file, builds a tree, analyzes it, and writes the results to a new file.
+
+    Parameters:
+    file_path (str): The path to the .rs3 file.
+    output_suffix (str): The suffix to append to the output file name.
+    """
+
+    output_file = f"{file_path}_analysis.txt"
+
+    segments, groups, relation_counts, rst_relations, multinuc_relations = parse_rs3(file_path)
+    nodes_data = segments
+    structure_data = groups
+
+    root = build_tree(nodes_data, structure_data)
+
+    with open(output_file, 'w', encoding='utf-8') as file:
+        file.write("Tree Structure:\n")
+        tree_str = print_tree(root)
+        file.write(tree_str + "\n")
+
+        file.write("\nAnalysis of Relations and Positions:\n")
+        analysis_str = analyze_relations_and_positions(root)
+        file.write(analysis_str + "\n")
+
+    print(f"Analysis written to: {output_file}")
+
+
+#######################################################################################################################
+
+def main():
+    parser = argparse.ArgumentParser(description="Process .rs3 files in a directory")
+    parser.add_argument(
+        "directory",
+        type=str,
+        help="The directory containing .rs3 files"
+    )
+    args = parser.parse_args()
+    directory = args.directory
+
+    files = find_rs3_files(directory)
+
+    for file in files:
+        process_rs3_file(file)
 
 
 #######################################################################################################################
 
 if __name__ == "__main__":
-    file_path = 'C:/Users/haufa/OneDrive/Desktop/hiwi/Annotationsvergleich/RST/UP_academic_census-Dietrmar.rs3'
-    segments, groups, relation_counts, rst_relations, multinuc_relations = parse_rs3(file_path)
+    #main()
 
-    # Sample data
-    nodes_data = segments
-    structure_data = groups
+    process_rs3_file('C:/Users/haufa/OneDrive/Desktop/hiwi/Annotationsvergleich/RST/UP_academic_census-Dietrmar.rs3')
 
-    # Build tree from data
-    root = build_tree(nodes_data, structure_data)
 
-    # Print the tree
-    print("Tree Structure:")
-    print_tree(root)
 
-    # Analyze relations and positions
-    print("\nAnalysis of Relations and Positions:")
-    analyze_relations_and_positions(root)
+
+
+
+
+#richtung
